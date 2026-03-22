@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,16 @@ import {
 } from "@/components/ui/dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
-import { Plus, Users, Calendar, User, CalendarCheck } from "lucide-react";
+import {
+  Plus,
+  Users,
+  Calendar,
+  User,
+  CalendarCheck,
+  Copy,
+  Check,
+  Mail,
+} from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -43,6 +52,22 @@ const COLORS = [
 
 const slot = (day: number, hour: number): TimeSlot => `${day}-${hour}`;
 
+/** 產生可作為 Email / 通訊軟體貼上的會議邀請文字（呼應作業：邀請會議、降低溝通成本） */
+function buildMeetingInviteText(slotKey: TimeSlot, memberList: Member[]): string {
+  const [d, h] = slotKey.split("-").map(Number);
+  const names = memberList.map((m) => m.name).join("、");
+  return [
+    "【MeetFlow 會議邀請】",
+    "",
+    `建議時間：${DAYS[d]} ${h}:00–${h + 1}:00（全員皆有空閒）`,
+    `參與成員：${names}`,
+    "",
+    "請各位在 MeetFlow 確認此時段；若需改期也可直接提出，減少反覆來回訊息。",
+    "",
+    "— MeetFlow · 智慧協作排程",
+  ].join("\n");
+}
+
 // ─── Fake initial data ────────────────────────────────────────────────────────
 
 // 假資料：三人皆有「週三 9–11」共同空閒，方便展示
@@ -52,11 +77,11 @@ const INITIAL_MEMBERS: Member[] = [
     name: "我",
     color: "bg-blue-500",
     availability: [
-      slot(0, 9), slot(0, 10), slot(0, 11),          // Mon 9–12
-      slot(0, 14), slot(0, 15), slot(0, 16),         // Mon 14–17
-      slot(2, 9),  slot(2, 10), slot(2, 11),         // Wed 9–12（共同）
-      slot(3, 14), slot(3, 15), slot(3, 16),         // Thu 14–17
-      slot(4, 9),  slot(4, 10),                      // Fri 9–11
+      slot(0, 9), slot(0, 10), slot(0, 11), // Mon 9–12
+      slot(0, 14), slot(0, 15), slot(0, 16), // Mon 14–17
+      slot(2, 9), slot(2, 10), slot(2, 11), // Wed 9–12（共同）
+      slot(3, 14), slot(3, 15), slot(3, 16), // Thu 14–17
+      slot(4, 9), slot(4, 10), // Fri 9–11
     ],
   },
   {
@@ -64,10 +89,10 @@ const INITIAL_MEMBERS: Member[] = [
     name: "小梁",
     color: "bg-green-500",
     availability: [
-      slot(0, 9),  slot(0, 10), slot(0, 11),         // Mon 9–12
-      slot(2, 9),  slot(2, 10), slot(2, 11),         // Wed 9–12（共同）
-      slot(2, 14), slot(2, 15), slot(2, 16),         // Wed 14–17
-      slot(4, 9),  slot(4, 10),                      // Fri 9–11
+      slot(0, 9), slot(0, 10), slot(0, 11), // Mon 9–12
+      slot(2, 9), slot(2, 10), slot(2, 11), // Wed 9–12（共同）
+      slot(2, 14), slot(2, 15), slot(2, 16), // Wed 14–17
+      slot(4, 9), slot(4, 10), // Fri 9–11
     ],
   },
   {
@@ -75,9 +100,9 @@ const INITIAL_MEMBERS: Member[] = [
     name: "盧盧",
     color: "bg-purple-500",
     availability: [
-      slot(1, 10), slot(1, 11), slot(1, 12),         // Tue 10–13
-      slot(2, 9),  slot(2, 10), slot(2, 11),         // Wed 9–12（共同）
-      slot(3, 14), slot(3, 15),                      // Thu 14–16
+      slot(1, 10), slot(1, 11), slot(1, 12), // Tue 10–13
+      slot(2, 9), slot(2, 10), slot(2, 11), // Wed 9–12（共同）
+      slot(3, 14), slot(3, 15), // Thu 14–16
     ],
   },
 ];
@@ -95,18 +120,24 @@ type DragState = {
 function ScheduleGrid({
   availability,
   onBatchToggle,
+  onToggle,
+  onSlotSelect,
+  selectedSlot,
   emerald = false,
 }: {
   availability: TimeSlot[];
   onBatchToggle?: (slots: TimeSlot[], fill: boolean) => void;
+  onToggle?: (day: number, hour: number) => void;
+  onSlotSelect?: (day: number, hour: number) => void;
+  selectedSlot?: TimeSlot | null;
   emerald?: boolean;
 }) {
   const [drag, setDrag] = useState<DragState | null>(null);
   const dragging = useRef(false);
 
-  // Commit the selection when mouse is released anywhere
   useEffect(() => {
     function handleMouseUp() {
+      if (!onBatchToggle) return;
       if (!dragging.current || !drag) return;
       const d0 = Math.min(drag.startDay, drag.curDay);
       const d1 = Math.max(drag.startDay, drag.curDay);
@@ -116,7 +147,7 @@ function ScheduleGrid({
       for (let d = d0; d <= d1; d++)
         for (let hi = h0; hi <= h1; hi++)
           selected.push(slot(d, HOURS[hi]));
-      onBatchToggle?.(selected, drag.filling);
+      onBatchToggle(selected, drag.filling);
       dragging.current = false;
       setDrag(null);
     }
@@ -155,43 +186,65 @@ function ScheduleGrid({
               {DAYS.map((_, d) => {
                 const s = slot(d, h);
                 const active = availability.includes(s);
-                const inRect = inDragRect(d, hi);
 
-                let cellClass: string;
-                if (inRect) {
-                  // Preview: show what the result will be
-                  cellClass = drag!.filling
-                    ? "bg-primary/60 border-primary/60"
-                    : "bg-muted border-border opacity-40";
-                } else if (active) {
-                  cellClass = emerald
-                    ? "bg-emerald-400 border-emerald-400"
-                    : "bg-primary border-primary";
-                } else {
-                  cellClass = "bg-muted border-border hover:bg-muted/60";
+                if (onBatchToggle) {
+                  const inRect = inDragRect(d, hi);
+                  let cellClass: string;
+                  if (inRect) {
+                    cellClass = drag!.filling
+                      ? "bg-primary/60 border-primary/60"
+                      : "bg-muted border-border opacity-40";
+                  } else if (active) {
+                    cellClass = emerald
+                      ? "bg-emerald-400 border-emerald-400"
+                      : "bg-primary border-primary";
+                  } else {
+                    cellClass = "bg-muted border-border hover:bg-muted/60";
+                  }
+                  return (
+                    <td key={d} className="p-0.5">
+                      <div
+                        className={`h-8 rounded border transition-colors ${cellClass} cursor-pointer`}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          dragging.current = true;
+                          setDrag({
+                            startDay: d,
+                            startHourIdx: hi,
+                            curDay: d,
+                            curHourIdx: hi,
+                            filling: !active,
+                          });
+                        }}
+                        onMouseOver={() => {
+                          if (!dragging.current) return;
+                          setDrag((prev) =>
+                            prev ? { ...prev, curDay: d, curHourIdx: hi } : prev
+                          );
+                        }}
+                      />
+                    </td>
+                  );
                 }
 
+                const selectable =
+                  Boolean(onToggle) ||
+                  Boolean(emerald && active && onSlotSelect);
+                const isSelected =
+                  emerald && selectedSlot != null && selectedSlot === s;
+                const cellClass = active
+                  ? emerald
+                    ? `bg-emerald-400 border-emerald-400 ${isSelected ? "ring-2 ring-emerald-800 ring-offset-2 ring-offset-background dark:ring-emerald-200" : ""}`
+                    : "bg-primary border-primary"
+                  : "bg-muted border-border hover:bg-muted/60";
                 return (
                   <td key={d} className="p-0.5">
                     <div
-                      className={`h-8 rounded border transition-colors ${cellClass} ${onBatchToggle ? "cursor-pointer" : "cursor-default"}`}
-                      onMouseDown={(e) => {
-                        if (!onBatchToggle) return;
-                        e.preventDefault();
-                        dragging.current = true;
-                        setDrag({
-                          startDay: d,
-                          startHourIdx: hi,
-                          curDay: d,
-                          curHourIdx: hi,
-                          filling: !active,
-                        });
-                      }}
-                      onMouseOver={() => {
-                        if (!dragging.current) return;
-                        setDrag((prev) =>
-                          prev ? { ...prev, curDay: d, curHourIdx: hi } : prev
-                        );
+                      className={`h-8 rounded border transition-colors ${cellClass} ${selectable ? "cursor-pointer" : "cursor-default"}`}
+                      onClick={() => {
+                        if (onToggle) onToggle(d, h);
+                        else if (emerald && active && onSlotSelect)
+                          onSlotSelect(d, h);
                       }}
                     />
                   </td>
@@ -227,16 +280,33 @@ export default function MeetFlow() {
   const [newName, setNewName] = useState("");
   const [open, setOpen] = useState(false);
   const [viewId, setViewId] = useState("xiao-liang");
+  /** 使用者點選的共同空閒時段；若已失效則由下方 useMemo 自動改回有效預設 */
+  const [userProposalSlot, setUserProposalSlot] = useState<TimeSlot | null>(
+    null
+  );
+  const [inviteCopied, setInviteCopied] = useState(false);
 
   const me = members.find((m) => m.id === "me")!;
   const others = members.filter((m) => m.id !== "me");
   const viewing = members.find((m) => m.id === viewId) ?? others[0];
 
-  const commonSlots = DAYS.flatMap((_, d) =>
-    HOURS.filter((h) =>
-      members.every((m) => m.availability.includes(slot(d, h)))
-    ).map((h) => slot(d, h))
+  const commonSlots = useMemo(
+    () =>
+      DAYS.flatMap((_, d) =>
+        HOURS.filter((h) =>
+          members.every((m) => m.availability.includes(slot(d, h)))
+        ).map((h) => slot(d, h))
+      ),
+    [members]
   );
+
+  const proposalSlot = useMemo(() => {
+    if (commonSlots.length === 0) return null;
+    if (userProposalSlot && commonSlots.includes(userProposalSlot)) {
+      return userProposalSlot;
+    }
+    return commonSlots[0];
+  }, [commonSlots, userProposalSlot]);
 
   function batchToggleMySlots(slots: TimeSlot[], fill: boolean) {
     setMembers((prev) =>
@@ -266,6 +336,23 @@ export default function MeetFlow() {
     setMembers((prev) => [...prev, newMember]);
     setNewName("");
     setOpen(false);
+  }
+
+  function selectProposalSlot(day: number, hour: number) {
+    setUserProposalSlot(slot(day, hour));
+    setInviteCopied(false);
+  }
+
+  async function copyMeetingInvite() {
+    if (!proposalSlot) return;
+    const text = buildMeetingInviteText(proposalSlot, members);
+    try {
+      await navigator.clipboard.writeText(text);
+      setInviteCopied(true);
+      window.setTimeout(() => setInviteCopied(false), 2000);
+    } catch {
+      window.prompt("請複製以下會議邀請文字：", text);
+    }
   }
 
   return (
@@ -456,7 +543,8 @@ export default function MeetFlow() {
             <div className="mb-5">
               <h2 className="text-base font-semibold">共同空閒時間</h2>
               <p className="text-sm text-muted-foreground mt-0.5">
-                所有 {members.length} 位成員都空閒的時段
+                所有 {members.length} 位成員都空閒的時段。選定後可一鍵複製會議邀請，方便在
+                Email 或通訊軟體發送。
               </p>
             </div>
 
@@ -473,25 +561,77 @@ export default function MeetFlow() {
                     目前沒有共同空閒時段
                   </p>
                 ) : (
-                  <ScheduleGrid availability={commonSlots} emerald />
+                  <ScheduleGrid
+                    availability={commonSlots}
+                    emerald
+                    selectedSlot={proposalSlot}
+                    onSlotSelect={selectProposalSlot}
+                  />
                 )}
               </CardContent>
             </Card>
 
             {commonSlots.length > 0 && (
-              <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                {commonSlots.map((s) => {
-                  const [d, h] = s.split("-").map(Number);
-                  return (
-                    <div
-                      key={s}
-                      className="text-sm px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-200"
-                    >
-                      {DAYS[d]} {h}:00–{h + 1}:00
-                    </div>
-                  );
-                })}
-              </div>
+              <>
+                <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {commonSlots.map((s) => {
+                    const [d, h] = s.split("-").map(Number);
+                    const selected = proposalSlot === s;
+                    return (
+                      <button
+                        type="button"
+                        key={s}
+                        onClick={() => selectProposalSlot(d, h)}
+                        className={`text-left text-sm px-3 py-2 rounded-lg border transition-colors ${
+                          selected
+                            ? "bg-emerald-600 text-white border-emerald-700 shadow-sm dark:bg-emerald-700"
+                            : "bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900"
+                        }`}
+                      >
+                        {DAYS[d]} {h}:00–{h + 1}:00
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {proposalSlot && (
+                  <Card className="mt-6 border-dashed">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                        <Mail className="w-4 h-4 shrink-0" />
+                        會議邀請草稿
+                      </CardTitle>
+                      <p className="text-xs text-muted-foreground font-normal">
+                        複製後可貼到郵件、LINE、Slack
+                        等，對齊作業情境中的「邀請會議」與降低溝通成本。
+                      </p>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <pre className="text-xs sm:text-sm whitespace-pre-wrap rounded-lg border bg-muted/50 p-4 font-mono leading-relaxed max-h-56 overflow-y-auto">
+                        {buildMeetingInviteText(proposalSlot, members)}
+                      </pre>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="gap-2"
+                        onClick={() => void copyMeetingInvite()}
+                      >
+                        {inviteCopied ? (
+                          <>
+                            <Check className="w-4 h-4" />
+                            已複製到剪貼簿
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4" />
+                            複製邀請文字
+                          </>
+                        )}
+                      </Button>
+                    </CardContent>
+                  </Card>
+                )}
+              </>
             )}
           </TabsContent>
         </Tabs>
