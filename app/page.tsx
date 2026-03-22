@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,16 @@ import {
 } from "@/components/ui/dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
-import { Plus, Users, Calendar, User, CalendarCheck } from "lucide-react";
+import {
+  Plus,
+  Users,
+  Calendar,
+  User,
+  CalendarCheck,
+  Copy,
+  Check,
+  Mail,
+} from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,6 +51,22 @@ const COLORS = [
 ];
 
 const slot = (day: number, hour: number): TimeSlot => `${day}-${hour}`;
+
+/** 產生可作為 Email / 通訊軟體貼上的會議邀請文字（呼應作業：邀請會議、降低溝通成本） */
+function buildMeetingInviteText(slotKey: TimeSlot, memberList: Member[]): string {
+  const [d, h] = slotKey.split("-").map(Number);
+  const names = memberList.map((m) => m.name).join("、");
+  return [
+    "【MeetFlow 會議邀請】",
+    "",
+    `建議時間：${DAYS[d]} ${h}:00–${h + 1}:00（全員皆有空閒）`,
+    `參與成員：${names}`,
+    "",
+    "請各位在 MeetFlow 確認此時段；若需改期也可直接提出，減少反覆來回訊息。",
+    "",
+    "— MeetFlow · 智慧協作排程",
+  ].join("\n");
+}
 
 // ─── Fake initial data ────────────────────────────────────────────────────────
 
@@ -87,10 +112,15 @@ const INITIAL_MEMBERS: Member[] = [
 function ScheduleGrid({
   availability,
   onToggle,
+  onSlotSelect,
+  selectedSlot,
   emerald = false,
 }: {
   availability: TimeSlot[];
   onToggle?: (day: number, hour: number) => void;
+  /** 共同空閒檢視：點選綠色格子以選定「會議邀請」時段 */
+  onSlotSelect?: (day: number, hour: number) => void;
+  selectedSlot?: TimeSlot | null;
   emerald?: boolean;
 }) {
   return (
@@ -115,16 +145,25 @@ function ScheduleGrid({
               {DAYS.map((_, d) => {
                 const s = slot(d, h);
                 const active = availability.includes(s);
+                const selectable =
+                  Boolean(onToggle) ||
+                  Boolean(emerald && active && onSlotSelect);
+                const isSelected =
+                  emerald && selectedSlot != null && selectedSlot === s;
                 const cellClass = active
                   ? emerald
-                    ? "bg-emerald-400 border-emerald-400"
+                    ? `bg-emerald-400 border-emerald-400 ${isSelected ? "ring-2 ring-emerald-800 ring-offset-2 ring-offset-background dark:ring-emerald-200" : ""}`
                     : "bg-primary border-primary"
                   : "bg-muted border-border hover:bg-muted/60";
                 return (
                   <td key={d} className="p-0.5">
                     <div
-                      className={`h-8 rounded border transition-colors ${cellClass} ${onToggle ? "cursor-pointer" : "cursor-default"}`}
-                      onClick={() => onToggle?.(d, h)}
+                      className={`h-8 rounded border transition-colors ${cellClass} ${selectable ? "cursor-pointer" : "cursor-default"}`}
+                      onClick={() => {
+                        if (onToggle) onToggle(d, h);
+                        else if (emerald && active && onSlotSelect)
+                          onSlotSelect(d, h);
+                      }}
                     />
                   </td>
                 );
@@ -159,16 +198,33 @@ export default function MeetFlow() {
   const [newName, setNewName] = useState("");
   const [open, setOpen] = useState(false);
   const [viewId, setViewId] = useState("xiao-liang");
+  /** 使用者點選的共同空閒時段；若已失效則由下方 useMemo 自動改回有效預設 */
+  const [userProposalSlot, setUserProposalSlot] = useState<TimeSlot | null>(
+    null
+  );
+  const [inviteCopied, setInviteCopied] = useState(false);
 
   const me = members.find((m) => m.id === "me")!;
   const others = members.filter((m) => m.id !== "me");
   const viewing = members.find((m) => m.id === viewId) ?? others[0];
 
-  const commonSlots = DAYS.flatMap((_, d) =>
-    HOURS.filter((h) =>
-      members.every((m) => m.availability.includes(slot(d, h)))
-    ).map((h) => slot(d, h))
+  const commonSlots = useMemo(
+    () =>
+      DAYS.flatMap((_, d) =>
+        HOURS.filter((h) =>
+          members.every((m) => m.availability.includes(slot(d, h)))
+        ).map((h) => slot(d, h))
+      ),
+    [members]
   );
+
+  const proposalSlot = useMemo(() => {
+    if (commonSlots.length === 0) return null;
+    if (userProposalSlot && commonSlots.includes(userProposalSlot)) {
+      return userProposalSlot;
+    }
+    return commonSlots[0];
+  }, [commonSlots, userProposalSlot]);
 
   function toggleMySlot(day: number, hour: number) {
     const s = slot(day, hour);
@@ -199,6 +255,24 @@ export default function MeetFlow() {
     setMembers((prev) => [...prev, newMember]);
     setNewName("");
     setOpen(false);
+  }
+
+  function selectProposalSlot(day: number, hour: number) {
+    setUserProposalSlot(slot(day, hour));
+    setInviteCopied(false);
+  }
+
+  async function copyMeetingInvite() {
+    if (!proposalSlot) return;
+    const text = buildMeetingInviteText(proposalSlot, members);
+    try {
+      await navigator.clipboard.writeText(text);
+      setInviteCopied(true);
+      window.setTimeout(() => setInviteCopied(false), 2000);
+    } catch {
+      // 非安全情境（少數瀏覽器）改為提示使用者手動複製
+      window.prompt("請複製以下會議邀請文字：", text);
+    }
   }
 
   return (
@@ -389,7 +463,8 @@ export default function MeetFlow() {
             <div className="mb-5">
               <h2 className="text-base font-semibold">共同空閒時間</h2>
               <p className="text-sm text-muted-foreground mt-0.5">
-                所有 {members.length} 位成員都空閒的時段
+                所有 {members.length} 位成員都空閒的時段。選定後可一鍵複製會議邀請，方便在
+                Email 或通訊軟體發送。
               </p>
             </div>
 
@@ -406,25 +481,76 @@ export default function MeetFlow() {
                     目前沒有共同空閒時段
                   </p>
                 ) : (
-                  <ScheduleGrid availability={commonSlots} emerald />
+                  <ScheduleGrid
+                    availability={commonSlots}
+                    emerald
+                    selectedSlot={proposalSlot}
+                    onSlotSelect={selectProposalSlot}
+                  />
                 )}
               </CardContent>
             </Card>
 
             {commonSlots.length > 0 && (
-              <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                {commonSlots.map((s) => {
-                  const [d, h] = s.split("-").map(Number);
-                  return (
-                    <div
-                      key={s}
-                      className="text-sm px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-200"
-                    >
-                      {DAYS[d]} {h}:00–{h + 1}:00
-                    </div>
-                  );
-                })}
-              </div>
+              <>
+                <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {commonSlots.map((s) => {
+                    const [d, h] = s.split("-").map(Number);
+                    const selected = proposalSlot === s;
+                    return (
+                      <button
+                        type="button"
+                        key={s}
+                        onClick={() => selectProposalSlot(d, h)}
+                        className={`text-left text-sm px-3 py-2 rounded-lg border transition-colors ${
+                          selected
+                            ? "bg-emerald-600 text-white border-emerald-700 shadow-sm dark:bg-emerald-700"
+                            : "bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900"
+                        }`}
+                      >
+                        {DAYS[d]} {h}:00–{h + 1}:00
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {proposalSlot && (
+                  <Card className="mt-6 border-dashed">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                        <Mail className="w-4 h-4 shrink-0" />
+                        會議邀請草稿
+                      </CardTitle>
+                      <p className="text-xs text-muted-foreground font-normal">
+                        複製後可貼到郵件、LINE、Slack 等，對齊作業情境中的「邀請會議」與降低溝通成本。
+                      </p>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <pre className="text-xs sm:text-sm whitespace-pre-wrap rounded-lg border bg-muted/50 p-4 font-mono leading-relaxed max-h-56 overflow-y-auto">
+                        {buildMeetingInviteText(proposalSlot, members)}
+                      </pre>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="gap-2"
+                        onClick={() => void copyMeetingInvite()}
+                      >
+                        {inviteCopied ? (
+                          <>
+                            <Check className="w-4 h-4" />
+                            已複製到剪貼簿
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4" />
+                            複製邀請文字
+                          </>
+                        )}
+                      </Button>
+                    </CardContent>
+                  </Card>
+                )}
+              </>
             )}
           </TabsContent>
         </Tabs>
